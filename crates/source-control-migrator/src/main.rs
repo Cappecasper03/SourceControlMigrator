@@ -164,8 +164,7 @@ fn checkout_commit(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tree = repo.find_tree(tree_id)?;
     let mut recorder = gix::traverse::tree::Recorder::default();
-    tree.traverse()
-        .breadthfirst(&mut recorder)?;
+    tree.traverse().breadthfirst(&mut recorder)?;
 
     let mut files = std::collections::HashSet::new();
     for entry in recorder.records {
@@ -245,9 +244,32 @@ fn report_event(event: &lore::interface::LoreEvent) {
     }
 }
 
+use lore::interface::LoreMetadataType;
+
+struct CommitMetadata {
+    timestamp_millis: u64,
+    author: String,
+    committer: String,
+}
+
+fn identity(signature: gix::actor::SignatureRef<'_>) -> String {
+    format!("{} <{}>", signature.name, signature.email)
+}
+
+fn commit_metadata(commit: &gix::Commit<'_>) -> Result<CommitMetadata, Box<dyn std::error::Error>> {
+    let author = commit.author().map_err(Exn::into_error)?;
+    let seconds = author.time().map_err(Exn::into_error)?.seconds;
+    Ok(CommitMetadata {
+        timestamp_millis: u64::try_from(seconds)? * 1000,
+        author: identity(author),
+        committer: identity(commit.committer().map_err(Exn::into_error)?),
+    })
+}
+
 async fn commit_to_lore(
     destination: &std::path::Path,
     message: &str,
+    metadata: &CommitMetadata,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stage = lore::file::LoreFileStageArgs {
         paths: lore::interface::LoreArray::from_vec(vec![lore::interface::LoreString::from(
@@ -260,12 +282,40 @@ async fn commit_to_lore(
         lore::file::stage(lore_globals(destination), stage, None).await,
         "stage",
     )?;
-    let commit = lore::revision::LoreRevisionCommitArgs {
+    let (keys, values, formats): (Vec<_>, Vec<_>, Vec<_>) = [
+        (
+            "timestamp",
+            metadata.timestamp_millis.to_string(),
+            LoreMetadataType::Numeric,
+        ),
+        (
+            "created-by",
+            metadata.author.clone(),
+            LoreMetadataType::String,
+        ),
+        (
+            "committed-by",
+            metadata.committer.clone(),
+            LoreMetadataType::String,
+        ),
+    ]
+    .into_iter()
+    .map(|(key, value, format)| {
+        (
+            lore::interface::LoreString::from(key),
+            lore::interface::LoreString::from(value),
+            format,
+        )
+    })
+    .collect();
+    let commit = lore::revision::LoreRevisionCommitWithMetadataArgs {
         message: lore::interface::LoreString::from(message),
-        ..Default::default()
+        keys: lore::interface::LoreArray::from_vec(keys),
+        values: lore::interface::LoreArray::from_vec(values),
+        formats: lore::interface::LoreArray::from_vec(formats),
     };
     check(
-        lore::revision::commit(
+        lore::revision::commit_with_metadata(
             lore_globals(destination),
             commit,
             Some(Box::new(report_event) as Box<_>),
@@ -300,7 +350,8 @@ async fn migrate(
 
         let message = commit.message_raw().map_err(Exn::into_error)?.to_string();
         checkout_commit(repo, destination, tree, &mut files)?;
-        commit_to_lore(destination, message.trim_end()).await?;
+        let metadata = commit_metadata(&commit)?;
+        commit_to_lore(destination, message.trim_end(), &metadata).await?;
         log_verbose!("[{}/{total}] Migrated {id}", number + 1);
     }
     check(
