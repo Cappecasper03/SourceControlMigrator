@@ -12,7 +12,7 @@ struct Arguments {
     )]
     source: String,
 
-    #[arg(short, long, default_value = ".")]
+    #[arg(short, long, default_value = "./Test")]
     destination: String,
 
     #[arg(short, long, default_value = "true")]
@@ -97,11 +97,7 @@ fn clone(
     drop(renderer);
     match result {
         Ok((repo, _outcome)) => Ok(repo),
-        Err(error) => {
-            eprintln!("gix clone failed: {}", error_chain(&error));
-            eprintln!("Falling back to system git");
-            clone_with_git(url, destination)
-        }
+        Err(error) => Err(error_chain(&error).into()),
     }
 }
 
@@ -113,24 +109,6 @@ fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     message
-}
-
-fn clone_with_git(
-    url: &str,
-    destination: &std::path::Path,
-) -> Result<gix::Repository, Box<dyn std::error::Error>> {
-    if destination.exists() {
-        std::fs::remove_dir_all(destination)?;
-    }
-    let status = std::process::Command::new("git")
-        .args(["clone", "--bare", "--progress", url])
-        .arg(destination)
-        .status()?;
-    if !status.success() {
-        let _ = std::fs::remove_dir_all(destination);
-        return Err(format!("git clone failed with {status}").into());
-    }
-    Ok(gix::open(destination)?)
 }
 
 fn fetch_or_clone(
@@ -178,19 +156,162 @@ fn collect_commit_ids(
     Ok(ids)
 }
 
-fn print_commit(
+fn checkout_commit(
     repo: &gix::Repository,
-    id: gix::ObjectId,
+    destination: &std::path::Path,
+    tree_id: gix::ObjectId,
+    previous_files: &mut std::collections::HashSet<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let commit = repo.find_commit(id)?;
-    let author = commit.author().map_err(Exn::into_error)?;
-    println!(
-        "{} {} {}",
-        id,
-        author.time().map_err(Exn::into_error)?.seconds,
-        commit.message().map_err(Exn::into_error)?.summary()
-    );
+    let tree = repo.find_tree(tree_id)?;
+    let mut recorder = gix::traverse::tree::Recorder::default();
+    tree.traverse()
+        .breadthfirst(&mut recorder)?;
+
+    let mut files = std::collections::HashSet::new();
+    for entry in recorder.records {
+        if !entry.mode.is_blob() && !entry.mode.is_link() {
+            continue;
+        }
+        let path = destination.join(gix::path::from_bstr(&entry.filepath));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, &repo.find_blob(entry.oid)?.data)?;
+        files.insert(path);
+    }
+
+    for removed in previous_files.difference(&files) {
+        std::fs::remove_file(removed)?;
+        let mut directory = removed.parent();
+        while let Some(parent) = directory.filter(|parent| *parent != destination) {
+            if std::fs::remove_dir(parent).is_err() {
+                break;
+            }
+            directory = parent.parent();
+        }
+    }
+    *previous_files = files;
     Ok(())
+}
+
+fn lore_globals(destination: &std::path::Path) -> lore::interface::LoreGlobalArgs {
+    lore::interface::LoreGlobalArgs {
+        repository_path: lore::interface::LoreString::from(destination.to_string_lossy().as_ref()),
+        offline: 1,
+        ..Default::default()
+    }
+}
+
+fn check(status: i32, what: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!("lore {what} failed with status {status}").into())
+    }
+}
+
+async fn create_lore_repository(
+    destination: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if destination.join(".lore").exists() {
+        return Err(format!(
+            "{} already contains a Lore repository, refusing to import into it",
+            destination.display()
+        )
+        .into());
+    }
+    std::fs::create_dir_all(destination)?;
+    let args = lore::repository::LoreRepositoryCreateArgs {
+        repository_url: lore::interface::LoreString::default(),
+        description: lore::interface::LoreString::default(),
+        id: lore::interface::LoreString::default(),
+        vfs: lore::repository::LoreVfsType::default(),
+        use_shared_store: lore::interface::LoreSharedStoreMode::Disabled,
+        shared_store_path: lore::interface::LoreString::default(),
+    };
+    check(
+        lore::repository::create(lore_globals(destination), args, None).await,
+        "repository create",
+    )
+}
+
+fn report_event(event: &lore::interface::LoreEvent) {
+    if let lore::interface::LoreEvent::Error(data) = event {
+        eprintln!(
+            "lore error {}: {}",
+            data.error_type,
+            data.error_inner.as_str()
+        );
+    }
+}
+
+async fn commit_to_lore(
+    destination: &std::path::Path,
+    message: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stage = lore::file::LoreFileStageArgs {
+        paths: lore::interface::LoreArray::from_vec(vec![lore::interface::LoreString::from(
+            destination.to_string_lossy().as_ref(),
+        )]),
+        case_change: 0,
+        scan: 1,
+    };
+    check(
+        lore::file::stage(lore_globals(destination), stage, None).await,
+        "stage",
+    )?;
+    let commit = lore::revision::LoreRevisionCommitArgs {
+        message: lore::interface::LoreString::from(message),
+        ..Default::default()
+    };
+    check(
+        lore::revision::commit(
+            lore_globals(destination),
+            commit,
+            Some(Box::new(report_event) as Box<_>),
+        )
+        .await,
+        "commit",
+    )
+}
+
+async fn migrate(
+    repo: &gix::Repository,
+    ids: Vec<gix::ObjectId>,
+    destination: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_lore_repository(destination).await?;
+    let destination = &std::fs::canonicalize(destination)?;
+
+    let mut files = std::collections::HashSet::new();
+    let total = ids.len();
+    let mut previous_tree = None;
+    for (number, id) in ids.into_iter().enumerate() {
+        let commit = repo.find_commit(id)?;
+        let tree = commit.tree_id().map_err(Exn::into_error)?.detach();
+        if previous_tree == Some(tree) {
+            log_verbose!(
+                "[{}/{total}] {id} has no tree changes, skipping",
+                number + 1
+            );
+            continue;
+        }
+        previous_tree = Some(tree);
+
+        let message = commit.message_raw().map_err(Exn::into_error)?.to_string();
+        checkout_commit(repo, destination, tree, &mut files)?;
+        commit_to_lore(destination, message.trim_end()).await?;
+        log_verbose!("[{}/{total}] Migrated {id}", number + 1);
+    }
+    check(
+        lore::repository::flush(
+            lore_globals(destination),
+            lore::repository::LoreRepositoryFlushArgs {},
+            None,
+        )
+        .await,
+        "flush",
+    )
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -199,12 +320,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log_verbose!("URL: {}", arguments.source);
     log_verbose!("Destination argument: {}", arguments.destination);
 
-    let destination = cache_directory(&arguments.source);
-    log_verbose!("Cache directory: {}", destination.display());
-    let repo = fetch_or_clone(&arguments.source, &destination)?;
+    let cache = cache_directory(&arguments.source);
+    log_verbose!("Cache directory: {}", cache.display());
+    let repo = fetch_or_clone(&arguments.source, &cache)?;
+    let ids = collect_commit_ids(&repo)?;
 
-    for id in collect_commit_ids(&repo)? {
-        print_commit(&repo, id)?;
-    }
-    Ok(())
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(migrate(
+            &repo,
+            ids,
+            std::path::Path::new(&arguments.destination),
+        ));
+    lore::shutdown();
+    result
 }

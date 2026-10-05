@@ -7,5 +7,6 @@ edition.workspace = true
 clap.workspace = true
 gix.workspace = true
 prodash.workspace = true
+tokio.workspace = true
 
 lore.workspace = true

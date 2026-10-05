@@ -10,6 +10,7 @@ edition = "2024"
 [workspace.dependencies]
 clap = { version = "*", features = ["derive"] }
 gix = { version = "*", features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
+tokio = { version = "*", features = ["rt-multi-thread"] }
 prodash = { version = "*", features = ["progress-tree", "render-line", "render-line-crossterm", "render-line-autoconfigure"] }
 
 lore = { git = "https://github.com/EpicGames/lore", tag = "v0.10.0" }

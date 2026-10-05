@@ -4416,6 +4416,7 @@ dependencies = [
  "gix",
  "lore",
  "prodash",
+ "tokio",
 ]
 
 [[package]]
