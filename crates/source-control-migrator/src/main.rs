@@ -21,7 +21,7 @@ struct Arguments {
 
 static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-macro_rules! verbose {
+macro_rules! log_verbose {
     ($($arg:tt)*) => {
         if VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!("[verbose] {}", format_args!($($arg)*));
@@ -29,25 +29,19 @@ macro_rules! verbose {
     };
 }
 
-fn parse_url(url: &str) -> std::path::PathBuf {
-    let mut parsed_url = std::path::PathBuf::new();
-
-    for segment in url
-        .split(['/', '\\', ':'])
-        .filter(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
-    {
-        parsed_url.push(segment.replace(
-            |c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')),
-            "_",
-        ));
-    }
-    parsed_url
+fn hash_url(url: &str) -> String {
+    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
+    hasher.update(url.as_bytes());
+    let id = hasher
+        .try_finalize()
+        .expect("hashing a short string cannot fail");
+    id.to_hex_with_len(16).to_string()
 }
 
 fn cache_directory(url: &str) -> std::path::PathBuf {
     std::env::temp_dir()
         .join("SourceControlMigrator")
-        .join(parse_url(url))
+        .join(hash_url(url))
 }
 
 fn progress_root() -> (
@@ -69,7 +63,7 @@ fn progress_root() -> (
 }
 
 fn fetch(repo: &gix::Repository) -> Result<(), Box<dyn std::error::Error>> {
-    verbose!("Fetching updates into {}", repo.git_dir().display());
+    log_verbose!("Fetching updates into {}", repo.git_dir().display());
     let (root, renderer) = progress_root();
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         repo.find_fetch_remote(None)?
@@ -91,10 +85,10 @@ fn clone(
     destination: &std::path::Path,
 ) -> Result<gix::Repository, Box<dyn std::error::Error>> {
     if destination.exists() {
-        verbose!("Removing existing directory {}", destination.display());
+        log_verbose!("Removing existing directory {}", destination.display());
         std::fs::remove_dir_all(destination)?;
     }
-    verbose!("Cloning {url} into {}", destination.display());
+    log_verbose!("Cloning {url} into {}", destination.display());
     std::fs::create_dir_all(destination)?;
 
     let (root, renderer) = progress_root();
@@ -104,10 +98,39 @@ fn clone(
     match result {
         Ok((repo, _outcome)) => Ok(repo),
         Err(error) => {
-            let _ = std::fs::remove_dir_all(destination);
-            Err(error.into())
+            eprintln!("gix clone failed: {}", error_chain(&error));
+            eprintln!("Falling back to system git");
+            clone_with_git(url, destination)
         }
     }
+}
+
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(&format!("\n  caused by: {cause}"));
+        source = cause.source();
+    }
+    message
+}
+
+fn clone_with_git(
+    url: &str,
+    destination: &std::path::Path,
+) -> Result<gix::Repository, Box<dyn std::error::Error>> {
+    if destination.exists() {
+        std::fs::remove_dir_all(destination)?;
+    }
+    let status = std::process::Command::new("git")
+        .args(["clone", "--bare", "--progress", url])
+        .arg(destination)
+        .status()?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(destination);
+        return Err(format!("git clone failed with {status}").into());
+    }
+    Ok(gix::open(destination)?)
 }
 
 fn fetch_or_clone(
@@ -115,15 +138,15 @@ fn fetch_or_clone(
     destination: &std::path::Path,
 ) -> Result<gix::Repository, Box<dyn std::error::Error>> {
     if destination.join("HEAD").exists() {
-        verbose!("Found cached repository at {}", destination.display());
+        log_verbose!("Found cached repository at {}", destination.display());
         match gix::open(destination) {
             Ok(repo) => match repo.head_id() {
                 Ok(head) => {
-                    verbose!("Cached repository HEAD is {head}");
+                    log_verbose!("Cached repository HEAD is {head}");
                     if let Err(error) = fetch(&repo) {
                         eprintln!("Fetch failed ({error}), using cached repository");
                     } else {
-                        verbose!("Fetch completed");
+                        log_verbose!("Fetch completed");
                     }
                     return Ok(repo);
                 }
@@ -136,31 +159,34 @@ fn fetch_or_clone(
     clone(url, destination)
 }
 
-fn collect_commits(
+fn collect_commit_ids(
     repo: &gix::Repository,
-) -> Result<Vec<gix::traverse::commit::Info>, Box<dyn std::error::Error>> {
+) -> Result<Vec<gix::ObjectId>, Box<dyn std::error::Error>> {
     let head = repo.head_id()?;
-    let mut commits = Builder::new(&repo.objects)
+    let walk = Builder::new(&repo.objects)
         .with_tips([head.detach()])
         .sorting(Sorting::DateOrder)
         .build()
-        .map_err(Exn::into_error)?
-        .collect::<Result<Vec<_>, _>>()
         .map_err(Exn::into_error)?;
-    commits.reverse();
-    verbose!("Collected {} commits", commits.len());
-    Ok(commits)
+
+    let mut ids = Vec::new();
+    for info in walk {
+        ids.push(info.map_err(Exn::into_error)?.id);
+    }
+    ids.reverse();
+    log_verbose!("Collected {} commits", ids.len());
+    Ok(ids)
 }
 
 fn print_commit(
     repo: &gix::Repository,
-    info: &gix::traverse::commit::Info,
+    id: gix::ObjectId,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let commit = repo.find_commit(info.id)?;
+    let commit = repo.find_commit(id)?;
     let author = commit.author().map_err(Exn::into_error)?;
     println!(
         "{} {} {}",
-        info.id,
+        id,
         author.time().map_err(Exn::into_error)?.seconds,
         commit.message().map_err(Exn::into_error)?.summary()
     );
@@ -170,15 +196,15 @@ fn print_commit(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
     VERBOSE.store(arguments.verbose, std::sync::atomic::Ordering::Relaxed);
-    verbose!("URL: {}", arguments.url);
-    verbose!("Destination argument: {}", arguments.destination);
+    log_verbose!("URL: {}", arguments.url);
+    log_verbose!("Destination argument: {}", arguments.destination);
 
     let destination = cache_directory(&arguments.url);
-    verbose!("Cache directory: {}", destination.display());
+    log_verbose!("Cache directory: {}", destination.display());
     let repo = fetch_or_clone(&arguments.url, &destination)?;
 
-    for info in collect_commits(&repo)? {
-        print_commit(&repo, &info)?;
+    for id in collect_commit_ids(&repo)? {
+        print_commit(&repo, id)?;
     }
     Ok(())
 }
