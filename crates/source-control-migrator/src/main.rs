@@ -156,30 +156,38 @@ fn collect_commit_ids(
     Ok(ids)
 }
 
+type Files = std::collections::HashMap<std::path::PathBuf, gix::ObjectId>;
+
+/// Brings the working tree to `tree_id`, touching only files that differ from `previous_files`,
+/// and returns the paths that were added, modified or removed.
 fn checkout_commit(
     repo: &gix::Repository,
     destination: &std::path::Path,
     tree_id: gix::ObjectId,
-    previous_files: &mut std::collections::HashSet<std::path::PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    previous_files: &mut Files,
+) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
     let tree = repo.find_tree(tree_id)?;
     let mut recorder = gix::traverse::tree::Recorder::default();
     tree.traverse().breadthfirst(&mut recorder)?;
 
-    let mut files = std::collections::HashSet::new();
+    let mut changed = Vec::new();
+    let mut files = Files::with_capacity(previous_files.len());
     for entry in recorder.records {
         if !entry.mode.is_blob() && !entry.mode.is_link() {
             continue;
         }
         let path = destination.join(gix::path::from_bstr(&entry.filepath));
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        if previous_files.get(&path) != Some(&entry.oid) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, &repo.find_blob(entry.oid)?.data)?;
+            changed.push(path.clone());
         }
-        std::fs::write(&path, &repo.find_blob(entry.oid)?.data)?;
-        files.insert(path);
+        files.insert(path, entry.oid);
     }
 
-    for removed in previous_files.difference(&files) {
+    for removed in previous_files.keys().filter(|path| !files.contains_key(*path)) {
         std::fs::remove_file(removed)?;
         let mut directory = removed.parent();
         while let Some(parent) = directory.filter(|parent| *parent != destination) {
@@ -188,9 +196,10 @@ fn checkout_commit(
             }
             directory = parent.parent();
         }
+        changed.push(removed.clone());
     }
     *previous_files = files;
-    Ok(())
+    Ok(changed)
 }
 
 fn lore_globals(destination: &std::path::Path) -> lore::interface::LoreGlobalArgs {
@@ -268,15 +277,19 @@ fn commit_metadata(commit: &gix::Commit<'_>) -> Result<CommitMetadata, Box<dyn s
 
 async fn commit_to_lore(
     destination: &std::path::Path,
+    changed: &[std::path::PathBuf],
     message: &str,
     metadata: &CommitMetadata,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stage = lore::file::LoreFileStageArgs {
-        paths: lore::interface::LoreArray::from_vec(vec![lore::interface::LoreString::from(
-            destination.to_string_lossy().as_ref(),
-        )]),
+        paths: lore::interface::LoreArray::from_vec(
+            changed
+                .iter()
+                .map(|path| lore::interface::LoreString::from(path.to_string_lossy().as_ref()))
+                .collect(),
+        ),
         case_change: 0,
-        scan: 1,
+        scan: 0,
     };
     check(
         lore::file::stage(lore_globals(destination), stage, None).await,
@@ -333,7 +346,7 @@ async fn migrate(
     create_lore_repository(destination).await?;
     let destination = &std::fs::canonicalize(destination)?;
 
-    let mut files = std::collections::HashSet::new();
+    let mut files = Files::new();
     let total = ids.len();
     let mut previous_tree = None;
     for (number, id) in ids.into_iter().enumerate() {
@@ -349,9 +362,13 @@ async fn migrate(
         previous_tree = Some(tree);
 
         let message = commit.message_raw().map_err(Exn::into_error)?.to_string();
-        checkout_commit(repo, destination, tree, &mut files)?;
+        let changed = checkout_commit(repo, destination, tree, &mut files)?;
+        if changed.is_empty() {
+            log_verbose!("[{}/{total}] {id} changes no file contents, skipping", number + 1);
+            continue;
+        }
         let metadata = commit_metadata(&commit)?;
-        commit_to_lore(destination, message.trim_end(), &metadata).await?;
+        commit_to_lore(destination, &changed, message.trim_end(), &metadata).await?;
         log_verbose!("[{}/{total}] Migrated {id}", number + 1);
     }
     check(
