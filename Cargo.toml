@@ -11,3 +11,9 @@ edition = "2024"
 clap = { version = "*", features = ["derive"] }
 gix = { version = "*", features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
 prodash = { version = "*", features = ["progress-tree", "render-line", "render-line-crossterm", "render-line-autoconfigure"] }
+
+lore = { git = "https://github.com/EpicGames/lore", tag = "v0.10.0" }
+
+[patch.crates-io]
+quinn-proto = { git = "https://github.com/EpicGames/lore", tag = "v0.10.0" }
+glob-match = { git = "https://github.com/EpicGames/lore", tag = "v0.10.0" }

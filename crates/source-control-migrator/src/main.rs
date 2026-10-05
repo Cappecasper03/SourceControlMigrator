@@ -10,7 +10,7 @@ struct Arguments {
         long,
         default_value = "https://github.com/Cappecasper03/SourceControlMigrator.git"
     )]
-    url: String,
+    source: String,
 
     #[arg(short, long, default_value = ".")]
     destination: String,
@@ -196,12 +196,12 @@ fn print_commit(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
     VERBOSE.store(arguments.verbose, std::sync::atomic::Ordering::Relaxed);
-    log_verbose!("URL: {}", arguments.url);
+    log_verbose!("URL: {}", arguments.source);
     log_verbose!("Destination argument: {}", arguments.destination);
 
-    let destination = cache_directory(&arguments.url);
+    let destination = cache_directory(&arguments.source);
     log_verbose!("Cache directory: {}", destination.display());
-    let repo = fetch_or_clone(&arguments.url, &destination)?;
+    let repo = fetch_or_clone(&arguments.source, &destination)?;
 
     for id in collect_commit_ids(&repo)? {
         print_commit(&repo, id)?;
