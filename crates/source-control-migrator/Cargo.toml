@@ -10,3 +10,6 @@ prodash.workspace = true
 tokio.workspace = true
 
 lore.workspace = true
+
+[dev-dependencies]
+dtor = "*"

@@ -13,8 +13,8 @@ gix = { version = "*", features = ["blocking-network-client", "blocking-http-tra
 tokio = { version = "*", features = ["rt-multi-thread"] }
 prodash = { version = "*", features = ["progress-tree", "render-line", "render-line-crossterm", "render-line-autoconfigure"] }
 
-lore = { git = "https://github.com/EpicGames/lore", tag = "v0.10.0" }
+lore = { git = "https://github.com/EpicGames/lore", tag = "v0.10.1" }
 
 [patch.crates-io]
-quinn-proto = { git = "https://github.com/EpicGames/lore", tag = "v0.10.0" }
-glob-match = { git = "https://github.com/EpicGames/lore", tag = "v0.10.0" }
+quinn-proto = { git = "https://github.com/EpicGames/lore", tag = "v0.10.1" }
+glob-match = { git = "https://github.com/EpicGames/lore", tag = "v0.10.1" }
