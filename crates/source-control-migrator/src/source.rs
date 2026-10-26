@@ -1,3 +1,5 @@
+use gix::traverse::commit::topo::{Builder, Sorting};
+
 fn hash_path(path: &str) -> String {
     let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
     hasher.update(path.as_bytes());
@@ -26,7 +28,7 @@ fn get_progress_root() -> (std::sync::Arc<prodash::tree::Root>, prodash::render:
 }
 
 fn fetch(repository: &gix::Repository) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Fetching into {}", repository.git_dir().display());
+    println!("Fetching into '{}'", repository.git_dir().display());
 
     let (root, renderer) = get_progress_root();
 
@@ -42,11 +44,11 @@ fn fetch(repository: &gix::Repository) -> Result<(), Box<dyn std::error::Error>>
 
 fn clone(source: &str, destination: &std::path::Path) -> Result<gix::Repository, Box<dyn std::error::Error>> {
     if destination.exists() {
-        println!("Removing existing cache: {}", destination.display());
+        println!("Removing existing cache: '{}'", destination.display());
         std::fs::remove_dir_all(destination)?;
     }
 
-    println!("Cloning {source} into {}", destination.display());
+    println!("Cloning '{source}' into '{}'", destination.display());
     std::fs::create_dir_all(destination)?;
 
     let (root, renderer) = get_progress_root();
@@ -77,7 +79,95 @@ fn fetch_or_clone(source: &str, destination: &std::path::Path) -> Result<gix::Re
     clone(source, destination)
 }
 
-pub fn open_source(source: &str) -> Result<gix::Repository, Box<dyn std::error::Error>> {
+pub fn open(source: &str) -> Result<gix::Repository, Box<dyn std::error::Error>> {
     let cache_path = get_cache_path(source);
     fetch_or_clone(source, &cache_path)
+}
+
+fn get_branch_tips(repository: &gix::Repository) -> Result<Vec<(String, gix::ObjectId)>, Box<dyn std::error::Error>> {
+    let mut local = std::collections::BTreeMap::new();
+    let mut remote = std::collections::BTreeMap::new();
+
+    for reference in repository.references()?.all()? {
+        let mut reference = reference?;
+        let name = reference.name().as_bstr().to_string();
+
+        let (branches, short) = if let Some(short) = name.strip_prefix("refs/heads/") {
+            (&mut local, short)
+        } else if let Some(short) = name.strip_prefix("refs/remotes/") {
+            (&mut remote, short)
+        } else {
+            continue;
+        };
+
+        if short == "HEAD" {
+            continue;
+        }
+
+        let short = short.to_string();
+        let Ok(id) = reference.peel_to_id() else {
+            continue;
+        };
+
+        branches.insert(short, id.detach());
+    }
+
+    for (name, id) in remote {
+        local.entry(name).or_insert(id);
+    }
+
+    Ok(local.into_iter().collect())
+}
+
+fn get_default_branch_name(repository: &gix::Repository, names: &[&str]) -> String {
+    if let Ok(Some(head)) = repository.head_name() {
+        let head = head.shorten().to_string();
+        if names.contains(&head.as_str()) {
+            return head;
+        }
+    }
+    ["main", "master"].into_iter().find(|name| names.contains(name)).unwrap_or(names[0]).to_string()
+}
+
+#[derive(Debug, Clone)]
+pub struct Branch {
+    pub name: String,
+    pub tip: gix::ObjectId,
+    pub commits: Vec<gix::ObjectId>,
+}
+
+pub fn get_branches(repository: &gix::Repository) -> Result<Vec<Branch>, Box<dyn std::error::Error>> {
+    let mut branch_tips = get_branch_tips(repository)?;
+    if branch_tips.is_empty() {
+        return Err("The source repository doesn't have branches".into());
+    }
+
+    let default_name = get_default_branch_name(
+        repository,
+        &branch_tips.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+    );
+    branch_tips.sort_by_key(|(name, _)| (*name != default_name, name.clone()));
+    println!("Default branch is {default_name}, found {} branches", branch_tips.len());
+
+    let mut branches = Vec::new();
+    let mut seen_tips = Vec::new();
+    for (name, tip) in branch_tips {
+        let builder = Builder::new(&repository.objects);
+        let builder = builder.with_tips([tip]);
+        let builder = builder.with_ends(seen_tips.iter().copied());
+        let builder = builder.sorting(Sorting::DateOrder);
+        let builder = builder.build()?;
+
+        let mut commits = Vec::new();
+        for info in builder {
+            commits.push(info?.id);
+        }
+
+        commits.reverse();
+        println!("Branch '{name}' contributes {} commits", commits.len());
+        seen_tips.push(tip);
+        branches.push(Branch { name, tip, commits });
+    }
+
+    Ok(branches)
 }

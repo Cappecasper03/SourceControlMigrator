@@ -1,4 +1,5 @@
 mod source;
+mod migrate;
 
 use clap::Parser;
 
@@ -10,15 +11,37 @@ struct Arguments {
 
     #[arg(short, long, default_value = ".")]
     destination: String,
-
-    #[arg(short, long)]
-    remote: Option<String>,
-
-    #[arg(short, long, default_value = "true")]
-    verbose: bool,
 }
 
-fn main() {
+fn source_name(source: &str) -> Option<&str> {
+    let is_separator = |c: char| c == '/' || c == '\\' || c == ':';
+
+    let last = source.trim_end_matches(is_separator).rsplit(is_separator).next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last);
+
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
-    let source = source::open_source(&arguments.source);
+
+    let mut destination = std::path::absolute(&arguments.destination)?;
+    if std::path::Path::new(&arguments.destination) == std::path::Path::new(".") {
+        let name = source_name(&arguments.source).ok_or_else(|| format!("Could not determine a name from source '{}'", arguments.source))?;
+        destination.push(name);
+    }
+
+    let destination = destination.as_path();
+    if destination.exists() {
+        return Err(format!("Destination '{}' already exists", destination.display()).into());
+    }
+
+    let repository = source::open(&arguments.source)?;
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    let builder = builder.enable_all();
+    let builder = builder.build()?;
+    builder.block_on(migrate::to(&repository, destination))?;
+
+    Ok(())
 }
