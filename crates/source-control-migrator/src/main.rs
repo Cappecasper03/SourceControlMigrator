@@ -1,5 +1,5 @@
 mod source;
-mod migrate;
+mod migrator;
 
 use clap::Parser;
 
@@ -11,6 +11,9 @@ struct Arguments {
 
     #[arg(short, long, default_value = ".")]
     destination: String,
+
+    #[arg(short, long, default_value = "true")]
+    force: bool,
 }
 
 fn source_name(source: &str) -> Option<&str> {
@@ -32,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let destination = destination.as_path();
-    if destination.exists() {
+    if !arguments.force && destination.exists() {
         return Err(format!("Destination '{}' already exists", destination.display()).into());
     }
 
@@ -41,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     let builder = builder.enable_all();
     let builder = builder.build()?;
-    builder.block_on(migrate::to(&repository, destination))?;
+    builder.block_on(migrator::migrate_to(&repository, destination))?;
 
     Ok(())
 }
