@@ -1,0 +1,15 @@
+[package]
+name = "source-control-migrator-ai"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+clap.workspace = true
+gix.workspace = true
+prodash.workspace = true
+tokio.workspace = true
+
+lore.workspace = true
+
+[dev-dependencies]
+dtor = "*"
