@@ -1,7 +1,7 @@
 use clap::Parser;
-use source_control_migrator::migrate::migrate_to;
-use source_control_migrator::source::open_source;
-use source_control_migrator::{Error, set_verbose};
+use source_control_migrator_ai::migrate::migrate_to;
+use source_control_migrator_ai::source::open_source;
+use source_control_migrator_ai::{Error, set_verbose};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
