@@ -119,38 +119,15 @@ fn get_branch_tips(repository: &gix::Repository) -> Result<Vec<(String, gix::Obj
     Ok(local.into_iter().collect())
 }
 
-fn get_default_branch_name(repository: &gix::Repository, names: &[&str]) -> String {
-    if let Ok(Some(head)) = repository.head_name() {
-        let head = head.shorten().to_string();
-        if names.contains(&head.as_str()) {
-            return head;
-        }
-    }
-    ["main", "master"].into_iter().find(|name| names.contains(name)).unwrap_or(names[0]).to_string()
-}
-
-#[derive(Debug, Clone)]
-pub struct Branch {
-    pub name: String,
-    pub tip: gix::ObjectId,
-    pub commits: Vec<gix::ObjectId>,
-}
-
-pub fn get_branches(repository: &gix::Repository) -> Result<Vec<Branch>, Box<dyn std::error::Error>> {
-    let mut branch_tips = get_branch_tips(repository)?;
+pub fn get_commits(repository: &gix::Repository) -> Result<Vec<(gix::ObjectId, String)>, Box<dyn std::error::Error>> {
+    let branch_tips = get_branch_tips(repository)?;
     if branch_tips.is_empty() {
         return Err("The source repository doesn't have branches".into());
     }
 
-    let default_name = get_default_branch_name(
-        repository,
-        &branch_tips.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
-    );
-    branch_tips.sort_by_key(|(name, _)| (*name != default_name, name.clone()));
-    println!("Default branch is {default_name}, found {} branches", branch_tips.len());
-
-    let mut branches = Vec::new();
+    let mut commits_with_time = Vec::new();
     let mut seen_tips = Vec::new();
+
     for (name, tip) in branch_tips {
         let builder = Builder::new(&repository.objects);
         let builder = builder.with_tips([tip]);
@@ -158,16 +135,17 @@ pub fn get_branches(repository: &gix::Repository) -> Result<Vec<Branch>, Box<dyn
         let builder = builder.sorting(Sorting::DateOrder);
         let builder = builder.build()?;
 
-        let mut commits = Vec::new();
         for info in builder {
-            commits.push(info?.id);
+            let id = info?.id;
+            let time = repository.find_commit(id)?.time()?.seconds;
+            commits_with_time.push((time, id, name.clone()));
         }
 
-        commits.reverse();
-        println!("Branch '{name}' contributes {} commits", commits.len());
         seen_tips.push(tip);
-        branches.push(Branch { name, tip, commits });
     }
 
-    Ok(branches)
+    commits_with_time.sort_by_key(|&(time, _, _)| time);
+
+    let commits = commits_with_time.into_iter().map(|(_, id, name)| (id, name)).collect();
+    Ok(commits)
 }

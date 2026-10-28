@@ -48,8 +48,25 @@ async fn create_lore_repository(destination: &Path) -> Result<(), Box<dyn std::e
 }
 
 pub async fn migrate_to(repository: &gix::Repository, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let branches = source::get_branches(repository)?;
+    let commits = source::get_commits(repository)?;
     create_lore_repository(destination).await?;
+
+    for (index, commit) in commits.iter().enumerate() {
+        let branch_name = &commit.1;
+        let name = if index == 0 {
+            "main".to_string()
+        } else if branch_name == "main" {
+            format!("{}-source", branch_name)
+        } else {
+            branch_name.to_string()
+        };
+
+        let commit_id = commit.0;
+        let commit = repository.find_commit(commit_id)?;
+
+        let message = commit.message()?;
+        println!("{}", message.title);
+    }
 
     Ok(())
 }
