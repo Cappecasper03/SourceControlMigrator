@@ -41,6 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let repository = source::open(&arguments.source)?;
 
+    if arguments.force && destination.exists() {
+        println!("Removing existing destination: '{}'", destination.display());
+        std::fs::remove_dir_all(destination)?;
+    }
+
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     let builder = builder.enable_all();
     let builder = builder.build()?;
