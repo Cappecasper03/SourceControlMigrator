@@ -6,7 +6,7 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Arguments {
-    #[arg(short, long, default_value = "https://github.com/Cappecasper03/SourceControlMigrator.git")]
+    #[arg(short, long, default_value = "tests/repository")]
     source: String,
 
     #[arg(short, long, default_value = ".")]

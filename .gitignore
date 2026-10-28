@@ -3,3 +3,7 @@
 
 # Rust
 target/
+
+# Local tests
+tests/
+repository/
