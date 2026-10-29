@@ -1,4 +1,4 @@
-use gix::traverse::commit::topo::{Builder, Sorting};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 fn hash_path(path: &str) -> String {
     let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
@@ -84,68 +84,77 @@ pub fn open(source: &str) -> Result<gix::Repository, Box<dyn std::error::Error>>
     fetch_or_clone(source, &cache_path)
 }
 
-fn get_branch_tips(repository: &gix::Repository) -> Result<Vec<(String, gix::ObjectId)>, Box<dyn std::error::Error>> {
-    let mut local = std::collections::BTreeMap::new();
-    let mut remote = std::collections::BTreeMap::new();
-
-    for reference in repository.references()?.all()? {
-        let mut reference = reference?;
-        let name = reference.name().as_bstr().to_string();
-
-        let (branches, short) = if let Some(short) = name.strip_prefix("refs/heads/") {
-            (&mut local, short)
-        } else if let Some(short) = name.strip_prefix("refs/remotes/") {
-            (&mut remote, short)
-        } else {
-            continue;
-        };
-
-        if short == "HEAD" {
-            continue;
-        }
-
-        let short = short.to_string();
-        let Ok(id) = reference.peel_to_id() else {
-            continue;
-        };
-
-        branches.insert(short, id.detach());
-    }
-
-    for (name, id) in remote {
-        local.entry(name).or_insert(id);
-    }
-
-    Ok(local.into_iter().collect())
-}
-
 pub fn get_commits(repository: &gix::Repository) -> Result<Vec<(gix::ObjectId, String)>, Box<dyn std::error::Error>> {
-    let branch_tips = get_branch_tips(repository)?;
-    if branch_tips.is_empty() {
+    let mut branch_tips = Vec::new();
+    for reference in repository.references()?.all()?.filter_map(Result::ok) {
+        let branch_name = reference.name().to_string();
+        if let Ok(id) = reference.into_fully_peeled_id() {
+            branch_tips.push((branch_name, id.detach()));
+        }
+    }
+
+    let mut tips = Vec::new();
+    let mut branches: Vec<(String, HashSet<gix::ObjectId>)> = Vec::new();
+    for (branch_name, tip_id) in branch_tips {
+        tips.push(tip_id);
+        if let Ok(walk) = repository.rev_walk([tip_id]).all() {
+            branches.push((branch_name, walk.filter_map(Result::ok).map(|info| info.id).collect()));
+        }
+    }
+
+    if branches.is_empty() {
         return Err("The source repository doesn't have branches".into());
     }
 
-    let mut commits_with_time = Vec::new();
-    let mut seen_tips = Vec::new();
+    let head_name = repository.head_name()?.unwrap().to_string();
+    branches.sort_by(|(a_name, a_commits), (b_name, b_commits)| {
+        let is_main = |name: &str| name == head_name;
+        is_main(b_name).cmp(&is_main(a_name)).then(a_commits.len().cmp(&b_commits.len())).then_with(|| a_name.cmp(b_name))
+    });
 
-    for (name, tip) in branch_tips {
-        let builder = Builder::new(&repository.objects);
-        let builder = builder.with_tips([tip]);
-        let builder = builder.with_ends(seen_tips.iter().copied());
-        let builder = builder.sorting(Sorting::DateOrder);
-        let builder = builder.build()?;
-
-        for info in builder {
-            let id = info?.id;
-            let time = repository.find_commit(id)?.time()?.seconds;
-            commits_with_time.push((time, id, name.clone()));
+    let mut commit_to_branch: HashMap<gix::ObjectId, &str> = HashMap::new();
+    for (name, commits) in &branches {
+        for commit in commits {
+            commit_to_branch.entry(*commit).or_insert(name.as_str());
         }
-
-        seen_tips.push(tip);
     }
 
-    commits_with_time.sort_by_key(|&(time, _, _)| time);
+    let mut revisions: Vec<_> = repository.rev_walk(tips).all()?.filter_map(Result::ok).collect();
+    revisions.reverse();
 
-    let commits = commits_with_time.into_iter().map(|(_, id, name)| (id, name)).collect();
+    let index_of: HashMap<gix::ObjectId, usize> = revisions.iter().enumerate().map(|(index, revision)| (revision.id, index)).collect();
+
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); revisions.len()];
+    let mut pending_parents = vec![0usize; revisions.len()];
+    for (index, revision) in revisions.iter().enumerate() {
+        for parent in &revision.parent_ids {
+            if let Some(&parent_index) = index_of.get(parent) {
+                children[parent_index].push(index);
+                pending_parents[index] += 1;
+            }
+        }
+    }
+
+    let mut ready: BTreeSet<usize> = (0..revisions.len()).filter(|&index| pending_parents[index] == 0).collect();
+    let mut commits = Vec::with_capacity(revisions.len());
+    let mut current_branch: Option<&str> = None;
+
+    while !ready.is_empty() {
+        let next = ready.iter().copied().find(|&index| Some(commit_to_branch[&revisions[index].id]) == current_branch).or_else(|| ready.first().copied()).unwrap();
+        ready.remove(&next);
+
+        let id = revisions[next].id;
+        let branch = commit_to_branch[&id];
+        current_branch = Some(branch);
+        commits.push((id, branch.to_string()));
+
+        for &child in &children[next] {
+            pending_parents[child] -= 1;
+            if pending_parents[child] == 0 {
+                ready.insert(child);
+            }
+        }
+    }
+
     Ok(commits)
 }
