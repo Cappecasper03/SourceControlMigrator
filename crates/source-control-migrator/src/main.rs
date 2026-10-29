@@ -1,5 +1,5 @@
-mod source;
 mod migrator;
+mod source;
 
 use clap::Parser;
 
@@ -19,7 +19,10 @@ struct Arguments {
 fn get_source_name(source: &str) -> Option<&str> {
     let is_separator = |c: char| c == '/' || c == '\\' || c == ':';
 
-    let last = source.trim_end_matches(is_separator).rsplit(is_separator).next()?;
+    let last = source
+        .trim_end_matches(is_separator)
+        .rsplit(is_separator)
+        .next()?;
     let name = last.strip_suffix(".git").unwrap_or(last);
 
     if name.is_empty() { None } else { Some(name) }
@@ -30,7 +33,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut destination = std::path::absolute(&arguments.destination)?;
     if std::path::Path::new(&arguments.destination) == std::path::Path::new(".") {
-        let name = get_source_name(&arguments.source).ok_or_else(|| format!("Could not determine a name from source '{}'", arguments.source))?;
+        let name = get_source_name(&arguments.source).ok_or_else(|| {
+            format!(
+                "Could not determine a name from source '{}'",
+                arguments.source
+            )
+        })?;
         destination.push(name);
     }
 

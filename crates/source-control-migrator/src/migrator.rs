@@ -1,6 +1,6 @@
-use std::path::Path;
-use lore::interface::{LoreEvent, LoreGlobalArgs, LoreString};
 use crate::source;
+use lore::interface::{LoreEvent, LoreGlobalArgs, LoreString};
+use std::path::Path;
 
 fn report_error(event: &LoreEvent) {
     match event {
@@ -19,7 +19,11 @@ fn report_error(event: &LoreEvent) {
 }
 async fn create_lore_repository(destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if destination.join(".lore").exists() {
-        return Err(format!("{} already contains a Lore repository, refusing to import into it", destination.display()).into());
+        return Err(format!(
+            "{} already contains a Lore repository, refusing to import into it",
+            destination.display()
+        )
+        .into());
     }
 
     std::fs::create_dir_all(destination)?;
@@ -39,15 +43,23 @@ async fn create_lore_repository(destination: &Path) -> Result<(), Box<dyn std::e
         shared_store_path: LoreString::default(),
     };
 
-    let status = lore::repository::create(globals, arguments, Some(Box::new(report_error) as Box<_>)).await;
+    let status =
+        lore::repository::create(globals, arguments, Some(Box::new(report_error) as Box<_>)).await;
     if status != 0 {
-        return Err(format!("Failed to create Lore repository in '{}' (status {status})", destination.display()).into());
+        return Err(format!(
+            "Failed to create Lore repository in '{}' (status {status})",
+            destination.display()
+        )
+        .into());
     }
 
     Ok(())
 }
 
-pub async fn migrate_to(repository: &gix::Repository, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn migrate_to(
+    repository: &gix::Repository,
+    destination: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let commits = source::get_commits(repository)?;
     create_lore_repository(destination).await?;
 
