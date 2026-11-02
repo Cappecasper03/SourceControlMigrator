@@ -158,6 +158,7 @@ pub fn get_commits(
 
         parent_start.push(parent_edges.len() as u32);
     }
+    drop(revisions);
 
     let mut tips: Vec<_> = reference_tips
         .into_iter()
@@ -169,6 +170,7 @@ pub fn get_commits(
             })
         })
         .collect();
+    drop(index_of);
 
     let get_parents = |commit: usize| {
         &parent_edges[parent_start[commit] as usize..parent_start[commit + 1] as usize]
@@ -191,6 +193,7 @@ pub fn get_commits(
             child_start_clone[parent_index as usize] += 1;
         }
     }
+    drop(child_start_clone);
 
     let get_children = |commit: usize| {
         &child_edges[child_start[commit] as usize..child_start[commit + 1] as usize]
@@ -215,6 +218,8 @@ pub fn get_commits(
             }
         }
     }
+    drop(pending_template_clone);
+    drop(stack);
 
     let mut mask = vec![0u64; count];
     for chunk_start in (0..tips.len()).step_by(64) {
@@ -242,6 +247,8 @@ pub fn get_commits(
             }
         }
     }
+    drop(mask);
+    drop(topology);
 
     let head_name = repository.head_name()?.map(|name| name.to_string());
     let is_main = |name: &str| head_name.as_deref() == Some(name);
@@ -251,6 +258,7 @@ pub fn get_commits(
             .then(a.reach.cmp(&b.reach))
             .then_with(|| a.name.cmp(&b.name))
     });
+    drop(head_name);
 
     const NONE: u32 = u32::MAX;
     let mut branch_of = vec![NONE; count];
@@ -272,6 +280,9 @@ pub fn get_commits(
             }
         }
     }
+    drop(stack);
+    drop(parent_edges);
+    drop(parent_start);
 
     let mut pending = pending_template;
     let mut done = vec![false; count];
